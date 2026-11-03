@@ -1,0 +1,214 @@
+# docker-compose.coolify.yml
+#
+# Coolify deployment manifest.
+# - Uses pre-built images from GHCR (built by GitHub Actions).
+# - Coolify manages TLS, routing, and the Traefik proxy — no Caddy needed.
+# - Set all SERVICE_FQDN_* and env vars in Coolify's Environment Variables UI.
+#
+# How to use in Coolify:
+#   1. New Resource → Docker Compose → paste this file (or point to repo)
+#   2. Set environment variables (see docs/coolify-env-vars.md)
+#   3. Assign domains to each service under "Domains"
+#   4. Deploy
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       connectshare
+      POSTGRES_USER:     cs_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cs_user -d connectshare"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ───────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --rename-command FLUSHALL ""
+      --rename-command FLUSHDB ""
+      --rename-command CONFIG ""
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Database migration (one-shot, runs before app) ─────────────────────────
+  migrate:
+    image: ghcr.io/${GITHUB_REPOSITORY}/app:${IMAGE_TAG:-latest}
+    restart: "no"
+    command: ["npx", "prisma", "migrate", "deploy"]
+    environment:
+      DATABASE_URL: postgresql://cs_user:${POSTGRES_PASSWORD}@postgres:5432/connectshare
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ── Next.js API server ──────────────────────────────────────────────────────
+  app:
+    image: ghcr.io/${GITHUB_REPOSITORY}/app:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    # Coolify reads SERVICE_FQDN_APP to assign the public domain + TLS
+    environment:
+      SERVICE_FQDN_APP: ${SERVICE_FQDN_APP}
+      NODE_ENV:                  production
+      DATABASE_URL:              postgresql://cs_user:${POSTGRES_PASSWORD}@postgres:5432/connectshare
+      REDIS_URL:                 redis://redis:6379
+      JWT_ACCESS_SECRET:         ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET:        ${JWT_REFRESH_SECRET}
+      INVITE_HMAC_SECRET:        ${INVITE_HMAC_SECRET}
+      DEVICE_TOKEN_SECRET:       ${DEVICE_TOKEN_SECRET}
+      WG_KEY_ENCRYPTION_SECRET:  ${WG_KEY_ENCRYPTION_SECRET}
+      RELAY_SESSION_KEY_SECRET:  ${RELAY_SESSION_KEY_SECRET}
+      RELAY_AUTH_SECRET:         ${RELAY_AUTH_SECRET}
+      JWT_ACCESS_EXPIRES_IN:     ${JWT_ACCESS_EXPIRES_IN:-15m}
+      JWT_REFRESH_EXPIRES_IN:    ${JWT_REFRESH_EXPIRES_IN:-7d}
+      PORT:                      3000
+      REALTIME_PORT:             3001
+      RELAY_PORT:                3002
+      APP_URL:                   https://${SERVICE_FQDN_APP}
+      RELAY_URL:                 wss://${SERVICE_FQDN_RELAY}
+      WG_SERVER_LISTEN_PORT:     ${WG_SERVER_LISTEN_PORT:-51820}
+      WG_BASE_SUBNET:            ${WG_BASE_SUBNET:-10.8.0.0/24}
+      WG_OUTBOUND_IFACE:         ${WG_OUTBOUND_IFACE:-eth0}
+      RELAY_AUTH_SECRET:         ${RELAY_AUTH_SECRET}
+      GATEWAY_HEARTBEAT_TIMEOUT_MS: ${GATEWAY_HEARTBEAT_TIMEOUT_MS:-30000}
+      GATEWAY_VERIFY_ATTEMPTS:   ${GATEWAY_VERIFY_ATTEMPTS:-3}
+      RATE_LIMIT_WINDOW_MS:      ${RATE_LIMIT_WINDOW_MS:-60000}
+      RATE_LIMIT_MAX:            ${RATE_LIMIT_MAX:-60}
+      METRICS_BEARER_TOKEN:      ${METRICS_BEARER_TOKEN}
+    ports:
+      - "3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health | grep -q ok"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Realtime WebSocket hub ──────────────────────────────────────────────────
+  realtime:
+    image: ghcr.io/${GITHUB_REPOSITORY}/app:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      SERVICE_FQDN_REALTIME: ${SERVICE_FQDN_REALTIME}
+      NODE_ENV:    production
+      REDIS_URL:   redis://redis:6379
+      DATABASE_URL: postgresql://cs_user:${POSTGRES_PASSWORD}@postgres:5432/connectshare
+      JWT_ACCESS_SECRET:  ${JWT_ACCESS_SECRET}
+      REALTIME_PORT:      3001
+      APP_URL:            https://${SERVICE_FQDN_APP}
+    command: ["node", "node_modules/tsx/dist/cli.mjs", "realtime/server.ts"]
+    ports:
+      - "3001"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # ── Relay / Networking Engine ───────────────────────────────────────────────
+  relay:
+    image: ghcr.io/${GITHUB_REPOSITORY}/app:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      SERVICE_FQDN_RELAY: ${SERVICE_FQDN_RELAY}
+      NODE_ENV:         production
+      REDIS_URL:        redis://redis:6379
+      DATABASE_URL:     postgresql://cs_user:${POSTGRES_PASSWORD}@postgres:5432/connectshare
+      APP_URL:          http://app:3000
+      RELAY_PORT:       3002
+      RELAY_AUTH_SECRET: ${RELAY_AUTH_SECRET}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      GATEWAY_VERIFY_ATTEMPTS: ${GATEWAY_VERIFY_ATTEMPTS:-3}
+    command: ["node", "node_modules/tsx/dist/cli.mjs", "relay/server.ts"]
+    ports:
+      - "3002"
+    depends_on:
+      app:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── Prometheus ───────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    restart: unless-stopped
+    volumes:
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.console.libraries=/usr/share/prometheus/console_libraries
+      - --web.console.templates=/usr/share/prometheus/consoles
+    configs:
+      - source: prometheus_config
+        target: /etc/prometheus/prometheus.yml
+      - source: alerts_config
+        target: /etc/prometheus/rules/alerts.yml
+    ports:
+      - "9090"
+    depends_on:
+      - app
+
+  # ── Grafana ────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.2
+    restart: unless-stopped
+    environment:
+      SERVICE_FQDN_GRAFANA:       ${SERVICE_FQDN_GRAFANA}
+      GF_SECURITY_ADMIN_USER:     ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_AUTH_ANONYMOUS_ENABLED:  "false"
+      GF_SERVER_ROOT_URL:         https://${SERVICE_FQDN_GRAFANA}
+    volumes:
+      - grafana_data:/var/lib/grafana
+    configs:
+      - source: grafana_datasource
+        target: /etc/grafana/provisioning/datasources/prometheus.yml
+      - source: grafana_dashboard_provider
+        target: /etc/grafana/provisioning/dashboards/dashboard.yml
+      - source: grafana_dashboard_json
+        target: /etc/grafana/provisioning/dashboards/connectshare.json
+    ports:
+      - "3000"
+    depends_on:
+      - prometheus
+
+# ── Named volumes ─────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+# ── Configs (inline file content for Prometheus + Grafana) ────────────────────
+configs:
+  prometheus_config:
+    file: ./monitoring/prometheus.yml
+  alerts_config:
+    file: ./monitoring/alerts.yml
+  grafana_datasource:
+    file: ./monitoring/grafana/provisioning/datasources/prometheus.yml
+  grafana_dashboard_provider:
+    file: ./monitoring/grafana/provisioning/dashboards/dashboard.yml
+  grafana_dashboard_json:
+    file: ./monitoring/grafana/provisioning/dashboards/connectshare.json

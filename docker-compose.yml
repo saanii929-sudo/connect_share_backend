@@ -1,5 +1,21 @@
 version: "3.9"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ConnectShare — Main Docker Compose
+# Works for: local production testing, Coolify (direct build from repo).
+# For CI/CD with pre-built images, use docker-compose.coolify.yml instead.
+# ─────────────────────────────────────────────────────────────────────────────
+
+x-app-image: &app-image
+  build:
+    context: .
+    dockerfile: Dockerfile
+    target: runner
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql://cs_user:${POSTGRES_PASSWORD:-changeme}@postgres:5432/connectshare
+  REDIS_URL:    redis://redis:6379
+
 services:
 
   # ── PostgreSQL ──────────────────────────────────────────────────────────────
@@ -22,7 +38,11 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: redis-server --appendonly yes
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
     volumes:
       - redis_data:/data
     healthcheck:
@@ -31,79 +51,65 @@ services:
       timeout:  5s
       retries:  5
 
-  # ── Next.js application ─────────────────────────────────────────────────────
+  # ── Database migration (one-shot, runs before app) ─────────────────────────
+  migrate:
+    <<: *app-image
+    environment:
+      <<: *app-env
+    command: ["npx", "prisma", "migrate", "deploy"]
+    restart: "no"
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  # ── Next.js API server ──────────────────────────────────────────────────────
   app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: runner
+    <<: *app-image
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://cs_user:${POSTGRES_PASSWORD:-changeme}@postgres:5432/connectshare
-      REDIS_URL:    redis://redis:6379
+      <<: *app-env
+      NODE_ENV: production
     ports:
       - "3000:3000"
     depends_on:
-      postgres: { condition: service_healthy }
-      redis:    { condition: service_healthy }
+      migrate:
+        condition: service_completed_successfully
+      redis: { condition: service_healthy }
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health | grep -q ok"]
       interval: 30s
       timeout:  10s
       retries:  3
 
-  # ── Realtime WebSocket server ────────────────────────────────────────────────
+  # ── Realtime WebSocket hub ──────────────────────────────────────────────────
   realtime:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: runner
+    <<: *app-image
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://cs_user:${POSTGRES_PASSWORD:-changeme}@postgres:5432/connectshare
-      REDIS_URL:    redis://redis:6379
+      <<: *app-env
+      NODE_ENV: production
     command: ["node", "node_modules/tsx/dist/cli.mjs", "realtime/server.ts"]
     ports:
       - "3001:3001"
     depends_on:
-      postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
 
-  # ── Relay / Networking Engine ──────────────────────────────────────────────
+  # ── Relay / Networking Engine ────────────────────────────────────────────────
   relay:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: runner
+    <<: *app-image
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://cs_user:${POSTGRES_PASSWORD:-changeme}@postgres:5432/connectshare
-      REDIS_URL:    redis://redis:6379
-      APP_URL:      http://app:3000
+      <<: *app-env
+      NODE_ENV: production
+      APP_URL:  http://app:3000
     command: ["node", "node_modules/tsx/dist/cli.mjs", "relay/server.ts"]
     ports:
       - "3002:3002"
     depends_on:
-      postgres: { condition: service_healthy }
-      redis:    { condition: service_healthy }
       app:      { condition: service_healthy }
-
-  # ── Prisma migration runner (one-shot) ────────────────────────────────────────
-  migrate:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: builder
-    env_file: .env
-    environment:
-      DATABASE_URL: postgresql://cs_user:${POSTGRES_PASSWORD:-changeme}@postgres:5432/connectshare
-    command: ["npx", "prisma", "migrate", "deploy"]
-    depends_on:
-      postgres: { condition: service_healthy }
-    profiles: ["migrate"]
+      redis:    { condition: service_healthy }
 
   # ── Prometheus ───────────────────────────────────────────────────────────────
   prometheus:
@@ -111,12 +117,11 @@ services:
     restart: unless-stopped
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/rules/alerts.yml:ro
       - prometheus_data:/prometheus
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
-      - --web.console.libraries=/usr/share/prometheus/console_libraries
-      - --web.console.templates=/usr/share/prometheus/consoles
     ports:
       - "9090:9090"
     depends_on:

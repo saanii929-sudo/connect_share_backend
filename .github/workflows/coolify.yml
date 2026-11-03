@@ -1,0 +1,79 @@
+# .github/workflows/coolify.yml
+#
+# Builds the Docker image, pushes to GitHub Container Registry (GHCR),
+# then triggers Coolify's deploy webhook.
+#
+# Required GitHub repository secrets:
+#   COOLIFY_WEBHOOK  — deploy webhook URL from Coolify (Settings → Webhooks)
+#   COOLIFY_TOKEN    — Coolify API token with Deploy permission
+#
+# The image is pushed as:
+#   ghcr.io/<owner>/<repo>/app:latest
+#   ghcr.io/<owner>/<repo>/app:<git-sha>
+
+name: Build & Deploy to Coolify
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY:   ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/app
+
+jobs:
+  build-and-deploy:
+    name: Build image and trigger Coolify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # needed to push to GHCR
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Docker Buildx (multi-platform + cache support) ─────────────
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── 3. Log in to GHCR ────────────────────────────────────────────────────
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 4. Generate image metadata (tags + labels) ────────────────────────────
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # ── 5. Build and push ─────────────────────────────────────────────────────
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── 6. Trigger Coolify deploy ─────────────────────────────────────────────
+      - name: Trigger Coolify deployment
+        run: |
+          curl --fail --silent --show-error \
+            --request POST '${{ secrets.COOLIFY_WEBHOOK }}' \
+            --header 'Authorization: Bearer ${{ secrets.COOLIFY_TOKEN }}'
+        # Fail the job if Coolify rejects the trigger
