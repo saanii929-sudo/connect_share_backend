@@ -1,0 +1,117 @@
+{
+  "uid": "connectshare-main",
+  "title": "ConnectShare — Overview",
+  "tags": ["connectshare"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "refresh": "15s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Active Sessions",
+      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+      "targets": [{
+        "datasource": "Prometheus",
+        "expr": "cs_sessions_active",
+        "legendFormat": "Active"
+      }]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Peers Online",
+      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+      "targets": [{
+        "datasource": "Prometheus",
+        "expr": "cs_peers_online",
+        "legendFormat": "Peers"
+      }]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Sessions Created (total)",
+      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+      "targets": [{
+        "datasource": "Prometheus",
+        "expr": "cs_sessions_created_total",
+        "legendFormat": "Total"
+      }]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Approvals Granted (total)",
+      "gridPos": { "x": 12, "y": 0, "w": 4, "h": 4 },
+      "targets": [{
+        "datasource": "Prometheus",
+        "expr": "cs_approvals_granted_total",
+        "legendFormat": "Granted"
+      }]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "HTTP Request Latency (p95)",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "targets": [{
+        "datasource": "Prometheus",
+        "expr": "histogram_quantile(0.95, sum(rate(cs_http_request_duration_seconds_bucket[5m])) by (le, route))",
+        "legendFormat": "{{route}}"
+      }]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Auth Failures / min",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "targets": [{
+        "datasource": "Prometheus",
+        "expr": "rate(cs_auth_failures_total[1m]) * 60",
+        "legendFormat": "{{reason}}"
+      }]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Bytes RX + TX (all sessions)",
+      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "datasource": "Prometheus",
+          "expr": "sum(increase(cs_bytes_rx_total[5m]))",
+          "legendFormat": "RX bytes (5m)"
+        },
+        {
+          "datasource": "Prometheus",
+          "expr": "sum(increase(cs_bytes_tx_total[5m]))",
+          "legendFormat": "TX bytes (5m)"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Node.js Process Memory (RSS)",
+      "gridPos": { "x": 0, "y": 20, "w": 12, "h": 6 },
+      "targets": [{
+        "datasource": "Prometheus",
+        "expr": "cs_nodejs_external_memory_bytes",
+        "legendFormat": "External"
+      }]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Event Loop Lag",
+      "gridPos": { "x": 12, "y": 20, "w": 12, "h": 6 },
+      "targets": [{
+        "datasource": "Prometheus",
+        "expr": "cs_nodejs_eventloop_lag_seconds",
+        "legendFormat": "Lag (s)"
+      }]
+    }
+  ]
+}

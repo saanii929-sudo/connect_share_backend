@@ -1,0 +1,145 @@
+version: "3.9"
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       connectshare
+      POSTGRES_USER:     cs_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cs_user -d connectshare"]
+      interval: 10s
+      timeout:  5s
+      retries:  5
+
+  # ── Redis ───────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout:  5s
+      retries:  5
+
+  # ── Next.js application ─────────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://cs_user:${POSTGRES_PASSWORD:-changeme}@postgres:5432/connectshare
+      REDIS_URL:    redis://redis:6379
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health | grep -q ok"]
+      interval: 30s
+      timeout:  10s
+      retries:  3
+
+  # ── Realtime WebSocket server ────────────────────────────────────────────────
+  realtime:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://cs_user:${POSTGRES_PASSWORD:-changeme}@postgres:5432/connectshare
+      REDIS_URL:    redis://redis:6379
+    command: ["node", "node_modules/tsx/dist/cli.mjs", "realtime/server.ts"]
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+
+  # ── Relay / Networking Engine ──────────────────────────────────────────────
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://cs_user:${POSTGRES_PASSWORD:-changeme}@postgres:5432/connectshare
+      REDIS_URL:    redis://redis:6379
+      APP_URL:      http://app:3000
+    command: ["node", "node_modules/tsx/dist/cli.mjs", "relay/server.ts"]
+    ports:
+      - "3002:3002"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+      app:      { condition: service_healthy }
+
+  # ── Prisma migration runner (one-shot) ────────────────────────────────────────
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://cs_user:${POSTGRES_PASSWORD:-changeme}@postgres:5432/connectshare
+    command: ["npx", "prisma", "migrate", "deploy"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    profiles: ["migrate"]
+
+  # ── Prometheus ───────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.console.libraries=/usr/share/prometheus/console_libraries
+      - --web.console.templates=/usr/share/prometheus/consoles
+    ports:
+      - "9090:9090"
+    depends_on:
+      - app
+
+  # ── Grafana ───────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.2
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER:     ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-changeme}
+      GF_AUTH_ANONYMOUS_ENABLED:  "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3002:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:

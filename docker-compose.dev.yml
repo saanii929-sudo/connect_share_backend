@@ -1,0 +1,39 @@
+# ConnectShare Development Docker Compose
+# Starts only infrastructure (PostgreSQL + Redis) for local dev.
+# The app, realtime, and relay run on the host via npm run dev.
+#
+# Usage: docker compose -f docker-compose.dev.yml up -d
+
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: connectshare_dev
+      POSTGRES_USER: cs_user
+      POSTGRES_PASSWORD: devpass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cs_user -d connectshare_dev"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_dev_data:

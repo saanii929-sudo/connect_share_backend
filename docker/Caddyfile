@@ -1,0 +1,53 @@
+# ConnectShare Caddyfile — TLS reverse proxy
+# Place this in /etc/caddy/Caddyfile (Linux host with a public domain)
+#
+# Caddy automatically provisions and renews Let's Encrypt certificates.
+# See https://caddyserver.com/docs/
+
+# ── API server ────────────────────────────────────────────────────────────────
+{$DOMAIN} {
+	encode zstd gzip
+
+	# Security headers
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+	}
+
+	# Next.js API — reverse proxy to the app container
+	reverse_proxy app:3000 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	# Rate limiting (basic — use Caddy's rate_limit module in production)
+	# @rate_limit expression `{path}.match(/^\/api\/v1\/auth/) && {remote_host}`
+	# rate_limit @rate_limit 10r/m
+}
+
+# ── WebSocket hub (realtime) ──────────────────────────────────────────────────
+ws.{$DOMAIN} {
+	reverse_proxy realtime:3001
+}
+
+# ── Relay (networking engine) ────────────────────────────────────────────────
+relay.{$DOMAIN} {
+	reverse_proxy relay:3002
+}
+
+# ── Grafana ──────────────────────────────────────────────────────────────────
+grafana.{$DOMAIN} {
+	reverse_proxy grafana:3000
+}
+
+# ── Prometheus (internal — restrict access) ──────────────────────────────────
+prometheus.{$DOMAIN} {
+	basic_auth {
+		{$PROM_USER} {$PROM_PASS_BCRYPT}
+	}
+	reverse_proxy prometheus:9090
+}

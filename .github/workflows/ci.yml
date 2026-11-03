@@ -1,0 +1,137 @@
+# ConnectShare CI/CD pipeline
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  # ── Lint + Typecheck + Build ────────────────────────────────────────────────
+  build:
+    name: Lint, Typecheck, Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+        env:
+          # Prisma 7 generate doesn't need a real DB URL, but the config loader
+          # may check for it — provide a dummy one.
+          DATABASE_URL: postgresql://dummy:dummy@localhost:5432/dummy
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+        continue-on-error: true   # lint warnings shouldn't block CI initially
+
+      - name: Build
+        run: npm run build
+        env:
+          # Build-time env: all secrets are dummy — real values injected at deploy
+          DATABASE_URL: postgresql://dummy:dummy@localhost:5432/dummy
+          JWT_ACCESS_SECRET: ci-dummy-jwt-access-secret-32bytes-minimum
+          JWT_REFRESH_SECRET: ci-dummy-jwt-refresh-secret-32bytes-m
+          INVITE_HMAC_SECRET: ci-dummy-invite-hmac-secret-32bytes-mi
+          DEVICE_TOKEN_SECRET: ci-dummy-device-token-secret-32bytes-m
+          WG_KEY_ENCRYPTION_SECRET: ci-dummy-wg-key-encryption-secret-32b
+          RELAY_SESSION_KEY_SECRET: ci-dummy-relay-session-key-secret-32b
+          RELAY_AUTH_SECRET: ci-dummy-relay-auth-secret-32bytes-minimum
+
+  # ── Unit tests ────────────────────────────────────────────────────────────────
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: connectshare_test
+          POSTGRES_USER: cs_user
+          POSTGRES_PASSWORD: testpass
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Run migrations
+        run: npx prisma migrate deploy
+        env:
+          DATABASE_URL: postgresql://cs_user:testpass@localhost:5432/connectshare_test
+
+      - name: Run tests
+        run: npm test -- --run
+        env:
+          DATABASE_URL: postgresql://cs_user:testpass@localhost:5432/connectshare_test
+          REDIS_URL: redis://localhost:6379
+          JWT_ACCESS_SECRET: test-jwt-access-secret-32bytes-minimum-xxxx
+          JWT_REFRESH_SECRET: test-jwt-refresh-secret-32bytes-minimum-xx
+          INVITE_HMAC_SECRET: test-invite-hmac-secret-32bytes-minimum-xxx
+          DEVICE_TOKEN_SECRET: test-device-token-secret-32bytes-minimum-xx
+          WG_KEY_ENCRYPTION_SECRET: test-wg-key-encryption-secret-32bytes-m
+          RELAY_SESSION_KEY_SECRET: test-relay-session-key-secret-32bytes-m
+          RELAY_AUTH_SECRET: test-relay-auth-secret-32bytes-minimum-xxxx
+          NODE_ENV: test
+
+  # ── Docker build (production image) ──────────────────────────────────────────
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: [build, test]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t connectshare/app:${{ github.sha }} .
+
+      # In production, push to your registry:
+      # - name: Login to registry
+      #   run: echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login -u ${{ secrets.REGISTRY_USER }} --password-stdin
+      # - name: Push image
+      #   run: |
+      #     docker tag connectshare/app:${{ github.sha }} <registry>/connectshare/app:latest
+      #     docker push <registry>/connectshare/app:latest

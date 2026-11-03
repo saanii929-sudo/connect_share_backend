@@ -1,0 +1,350 @@
+// ConnectShare Prisma Schema v2
+// Prisma 7: no url in datasource — URL lives in prisma.config.ts
+// Runtime: PrismaClient uses @prisma/adapter-pg
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+enum DeviceStatus {
+  ACTIVE
+  REVOKED
+  OFFLINE
+}
+
+enum DevicePlatform {
+  ANDROID
+  IOS
+  WINDOWS
+  MACOS
+  LINUX
+  WEB
+  UNKNOWN
+}
+
+// Session/connection lifecycle
+enum ConnectionStatus {
+  PENDING            // created, gateway not yet connected
+  GATEWAY_CONNECTED  // creator gateway is up, awaiting readiness check
+  READY              // gateway verified, accepting recipient requests
+  ACTIVE             // at least one recipient fully connected, traffic flowing
+  PAUSED             // creator paused the session
+  EXPIRED            // past expiresAt
+  TERMINATED         // manually stopped by creator
+  ERROR              // unrecoverable error state
+}
+
+// Status of the creator-side gateway (tracked independently)
+enum GatewayStatus {
+  DISCONNECTED
+  CONNECTING
+  CONNECTED
+  VERIFIED     // relay has confirmed it can forward traffic through this gateway
+  FAILED
+}
+
+enum InvitationStatus {
+  PENDING
+  CLAIMED
+  EXPIRED
+  REVOKED
+}
+
+enum ParticipantRole {
+  CREATOR
+  RECIPIENT
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  REVOKED
+}
+
+// Per-participant connection state
+enum ParticipantConnectionStatus {
+  PENDING_APPROVAL
+  APPROVED
+  TUNNEL_PROVISIONED
+  TUNNEL_CONNECTING
+  CONNECTED          // tunnel up, traffic flowing
+  DISCONNECTED
+  REJECTED
+  REVOKED
+  ERROR
+}
+
+enum TunnelStatus {
+  INITIALIZING
+  CONNECTING
+  ACTIVE
+  RECONNECTING
+  TERMINATED
+  FAILED
+}
+
+enum AuditAction {
+  // Auth
+  USER_REGISTERED
+  USER_LOGIN
+  USER_LOGOUT
+  USER_DELETED
+  // Device
+  DEVICE_REGISTERED
+  DEVICE_REVOKED
+  // Connection
+  CONNECTION_CREATED
+  CONNECTION_GATEWAY_REGISTERED
+  CONNECTION_GATEWAY_VERIFIED
+  CONNECTION_READY
+  CONNECTION_ACTIVATED
+  CONNECTION_PAUSED
+  CONNECTION_TERMINATED
+  CONNECTION_EXPIRED
+  // Invitation
+  INVITATION_CREATED
+  INVITATION_CLAIMED
+  INVITATION_REVOKED
+  // Participant
+  JOIN_REQUESTED
+  PARTICIPANT_APPROVED
+  PARTICIPANT_REJECTED
+  PARTICIPANT_REVOKED
+  PARTICIPANT_LEFT
+  // Tunnel
+  TUNNEL_PROVISIONED
+  TUNNEL_ESTABLISHED
+  TUNNEL_TERMINATED
+  // Usage
+  USAGE_RECORDED
+}
+
+// ─── Models ───────────────────────────────────────────────────────────────────
+
+model User {
+  id           String     @id @default(cuid())
+  fullName     String
+  email        String     @unique
+  passwordHash String
+  status       UserStatus @default(ACTIVE)
+  role         UserRole   @default(USER)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  deletedAt    DateTime?
+
+  devices      Device[]
+  connections  Connection[]            @relation("ConnectionCreator")
+  invitations  Invitation[]
+  participants ConnectionParticipant[] @relation("ParticipantUser")
+  auditLogs    AuditLog[]
+
+  @@index([email])
+  @@map("users")
+}
+
+model Device {
+  id           String         @id @default(cuid())
+  userId       String
+  user         User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceName   String
+  platform     DevicePlatform @default(UNKNOWN)
+  appVersion   String?
+  // Authentication credential: SHA-256 fingerprint of the device's Ed25519 public key
+  fingerprint  String         @unique
+  publicKey    String         // Ed25519 public key (base64) — used to verify device challenges
+  deviceStatus DeviceStatus   @default(ACTIVE)
+  lastSeenAt   DateTime?
+  userAgent    String?
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  tunnelSessions TunnelSession[]
+  participants   ConnectionParticipant[]
+  createdConnections Connection[]        @relation("ConnectionCreatorDevice")
+
+  @@index([userId])
+  @@index([fingerprint])
+  @@map("devices")
+}
+
+model Connection {
+  id              String           @id @default(cuid())
+  creatorUserId   String
+  creator         User             @relation("ConnectionCreator", fields: [creatorUserId], references: [id])
+  creatorDeviceId String
+  creatorDevice   Device           @relation("ConnectionCreatorDevice", fields: [creatorDeviceId], references: [id])
+  title           String?
+  sessionStatus   ConnectionStatus @default(PENDING)
+  gatewayStatus   GatewayStatus    @default(DISCONNECTED)
+  maxRecipients   Int              @default(5)
+  // Bandwidth & data limits (enforced by relay + cleanup worker)
+  maxBytesTotal   BigInt?          // hard cap on total bytes; null = unlimited
+  bandwidthLimitBps Int?           // bytes/sec per tunnel; null = unlimited
+  // WireGuard server-side key material (for Linux-host deployment)
+  wgServerPubKey  String?          // base64 X25519 public key (server)
+  wgServerPrivKey String?          // AES-256-GCM encrypted at rest
+  wgServerAddress String?          // e.g. "10.8.0.1/24"
+  wgListenPort    Int?
+  wgEndpoint      String?          // "host:port" peers connect to
+  // Relay coordination
+  relayNodeId     String?          // which relay node owns this session
+  relaySessionKey String?          // ephemeral session key for relay auth (encrypted)
+  expiresAt       DateTime
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  disconnectedAt  DateTime?
+
+  invitations    Invitation[]
+  participants   ConnectionParticipant[]
+  tunnelSessions TunnelSession[]
+  usageStats     UsageStatistic[]
+  events         ConnectionEvent[]
+
+  @@index([creatorUserId])
+  @@index([sessionStatus])
+  @@index([expiresAt])
+  @@map("connections")
+}
+
+model Invitation {
+  id          String           @id @default(cuid())
+  connectionId String
+  connection  Connection       @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  creatorId   String
+  creator     User             @relation(fields: [creatorId], references: [id])
+  // tokenHash: store ONLY the hash — the raw token is never persisted
+  tokenHash   String           @unique
+  status      InvitationStatus @default(PENDING)
+  maxUses     Int              @default(1)
+  currentUses Int              @default(0)
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  participants ConnectionParticipant[]
+
+  @@index([connectionId])
+  @@index([tokenHash])
+  @@index([status])
+  @@map("invitations")
+}
+
+model ConnectionParticipant {
+  id               String                      @id @default(cuid())
+  connectionId     String
+  connection       Connection                  @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  userId           String
+  user             User                        @relation("ParticipantUser", fields: [userId], references: [id])
+  deviceId         String
+  device           Device                      @relation(fields: [deviceId], references: [id])
+  invitationId     String?
+  invitation       Invitation?                 @relation(fields: [invitationId], references: [id])
+  participantRole  ParticipantRole
+  approvalStatus   ApprovalStatus              @default(PENDING)
+  connectionStatus ParticipantConnectionStatus @default(PENDING_APPROVAL)
+  joinedAt         DateTime?
+  disconnectedAt   DateTime?
+  createdAt        DateTime                    @default(now())
+  updatedAt        DateTime                    @updatedAt
+
+  tunnelSession    TunnelSession?
+
+  @@unique([connectionId, userId])
+  @@index([connectionId])
+  @@index([userId])
+  @@index([approvalStatus])
+  @@map("connection_participants")
+}
+
+model TunnelSession {
+  id              String       @id @default(cuid())
+  connectionId    String
+  connection      Connection   @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  participantId   String       @unique
+  participant     ConnectionParticipant @relation(fields: [participantId], references: [id])
+  deviceId        String
+  device          Device       @relation(fields: [deviceId], references: [id])
+  // Tunnel identifier — opaque string used by the relay to route packets
+  tunnelIdentifier String      @unique
+  tunnelStatus    TunnelStatus @default(INITIALIZING)
+  // WireGuard peer keys (for WireGuard deployments)
+  wgPeerPubKey    String?
+  wgPeerPrivKey   String?      // encrypted at rest, returned once on provisioning
+  wgPeerAddress   String?
+  lastHandshakeAt DateTime?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  @@index([connectionId])
+  @@index([deviceId])
+  @@map("tunnel_sessions")
+}
+
+model UsageStatistic {
+  id                   String     @id @default(cuid())
+  connectionId         String
+  connection           Connection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  participantId        String?
+  bytesUploaded        BigInt     @default(0)
+  bytesDownloaded      BigInt     @default(0)
+  averageDownloadSpeed Float?     // bytes/second
+  averageUploadSpeed   Float?     // bytes/second
+  latencyMs            Float?
+  recordedAt           DateTime   @default(now())
+
+  @@index([connectionId])
+  @@index([participantId])
+  @@index([recordedAt])
+  @@map("usage_statistics")
+}
+
+model ConnectionEvent {
+  id           String     @id @default(cuid())
+  connectionId String
+  connection   Connection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  eventType    String     // free-form event name, e.g. "GATEWAY_CONNECTED"
+  eventMetadata Json?
+  createdAt    DateTime   @default(now())
+
+  @@index([connectionId])
+  @@index([eventType])
+  @@index([createdAt])
+  @@map("connection_events")
+}
+
+model AuditLog {
+  id         String      @id @default(cuid())
+  userId     String?
+  user       User?       @relation(fields: [userId], references: [id])
+  action     AuditAction
+  resourceId String?
+  metadata   Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime    @default(now())
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
