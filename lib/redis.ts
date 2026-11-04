@@ -18,17 +18,12 @@ function createRedisClient(): Redis {
     enableReadyCheck: true,
     lazyConnect: true,
     // Exponential back-off: 200ms → 400ms → … → 5s cap, max 10 reconnect attempts
-    // After 10 failures it stops retrying and logs a single warning.
     retryStrategy: (times: number) => {
       if (times > 10) {
         logger.warn({ times }, 'redis:giving-up-reconnect')
-        return null   // stop retrying
+        return null
       }
       return Math.min(times * 200, 5000)
-    },
-    reconnectOnError: (err: Error) => {
-      // Only reconnect on READONLY errors (e.g. Redis replica failover)
-      return err.message.includes('READONLY')
     },
   })
   client.on('connect', () => logger.info('redis:connected'))
