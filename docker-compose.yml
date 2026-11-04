@@ -67,6 +67,8 @@ services:
     restart: unless-stopped
     environment:
       <<: *app-env
+      # Coolify reads SERVICE_FQDN_* to route Traefik to this service
+      SERVICE_FQDN_APP: ${SERVICE_FQDN_APP:-}
       NODE_ENV:                 production
       JWT_ACCESS_SECRET:        ${JWT_ACCESS_SECRET}
       JWT_REFRESH_SECRET:       ${JWT_REFRESH_SECRET}
