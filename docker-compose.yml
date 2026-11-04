@@ -96,11 +96,9 @@ services:
       migrate:
         condition: service_completed_successfully
       redis: { condition: service_healthy }
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health | grep -q ok"]
-      interval: 30s
-      timeout:  10s
-      retries:  3
+    # No Docker healthcheck — Coolify's proxy handles liveness.
+    # A healthcheck here blocks relay/grafana from starting if app is slow.
+    # Use GET /api/health manually to verify after deploy.
 
   # ── Realtime WebSocket hub ──────────────────────────────────────────────────
   realtime:
@@ -134,7 +132,7 @@ services:
     ports:
       - "3002:3002"
     depends_on:
-      app:   { condition: service_healthy }
+      app:   { condition: service_started }
       redis: { condition: service_healthy }
 
   # ── Prometheus (config baked into custom image — no host mounts) ────────────
