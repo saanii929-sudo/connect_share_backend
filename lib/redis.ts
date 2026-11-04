@@ -16,7 +16,6 @@ function createRedisClient(): Redis {
   const client = new Redis(url, {
     maxRetriesPerRequest: 3,
     enableReadyCheck: true,
-    lazyConnect: true,
     // Exponential back-off: 200ms → 400ms → … → 5s cap, max 10 reconnect attempts
     retryStrategy: (times: number) => {
       if (times > 10) {
