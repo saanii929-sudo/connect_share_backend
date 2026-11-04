@@ -1,0 +1,111 @@
+# ConnectShare Prometheus alerting rules
+# Load this in prometheus.yml via rule_files: [alerts.yml]
+# Or mount at /etc/prometheus/rules/alerts.yml
+
+groups:
+  - name: connectshare
+    rules:
+      # ── Availability ────────────────────────────────────────────────────────
+      - alert: ConnectShareAPIDown
+        expr: up{job="connectshare_app"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ConnectShare API is down"
+          description: "The API server has been unreachable for 2 minutes."
+
+      - alert: ConnectShareRelayDown
+        expr: up{job="connectshare_relay"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ConnectShare relay server is down"
+
+      # ── High error rate ─────────────────────────────────────────────────────
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(cs_http_request_duration_seconds_count{status=~"5.."}[5m]))
+          /
+          sum(rate(cs_http_request_duration_seconds_count[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "API error rate above 5%"
+          description: "{{ $value | humanizePercentage }} of requests are returning 5xx errors."
+
+      # ── Auth failures spike ─────────────────────────────────────────────────
+      - alert: AuthFailureSpike
+        expr: rate(cs_auth_failures_total[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Authentication failure spike"
+          description: "More than 10 auth failures/min for 5 minutes — possible brute force."
+
+      # ── Gateway health ──────────────────────────────────────────────────────
+      - alert: GatewayVerificationFailures
+        expr: rate(cs_relay_gateway_verifications_total{result="failure"}[10m]) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway verification failures"
+          description: "Relay is failing to verify gateways — creators may not be able to share."
+
+      # ── Resource exhaustion ─────────────────────────────────────────────────
+      - alert: HighMemoryUsage
+        expr: cs_nodejs_external_memory_bytes > 536870912
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Node.js process using >512MB external memory"
+
+      - alert: HighEventLoopLag
+        expr: cs_nodejs_eventloop_lag_seconds > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Event loop lag above 500ms"
+          description: "The Node.js event loop is blocked — investigate long-running operations."
+
+      # ── Relay capacity ───────────────────────────────────────────────────────
+      - alert: RelayAtCapacity
+        expr: cs_relay_gateways_connected > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Relay approaching capacity (>100 gateways)"
+
+      - alert: RelayTunnelCountHigh
+        expr: cs_relay_tunnels_connected > 500
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Relay has >500 active tunnels"
+
+      # ── Data limit terminations ──────────────────────────────────────────────
+      - alert: DataLimitTerminationSpike
+        expr: rate(cs_sessions_terminated_by_limit_total[1h]) > 5
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "Multiple sessions terminated by data limit"
+          description: "Users are hitting their data caps — consider quota review."
+
+      # ── Database ──────────────────────────────────────────────────────────────
+      - alert: DatabaseConnectionFailures
+        expr: increase(cs_auth_failures_total{reason="user_not_found"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: "Database queries are executing (informational)"

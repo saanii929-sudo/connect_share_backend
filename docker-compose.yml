@@ -2,8 +2,8 @@ version: "3.9"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ConnectShare — Main Docker Compose
-# Works for: local production testing, Coolify (direct build from repo).
-# For CI/CD with pre-built images, use docker-compose.coolify.yml instead.
+# Designed for Coolify (direct build from repo) and local production testing.
+# NO host-path bind mounts — all config is baked into images.
 # ─────────────────────────────────────────────────────────────────────────────
 
 x-app-image: &app-image
@@ -51,7 +51,7 @@ services:
       timeout:  5s
       retries:  5
 
-  # ── Database migration (one-shot, runs before app) ─────────────────────────
+  # ── Database migration (runs once before app starts) ─────────────────────────
   migrate:
     <<: *app-image
     environment:
@@ -65,10 +65,31 @@ services:
   app:
     <<: *app-image
     restart: unless-stopped
-    env_file: .env
     environment:
       <<: *app-env
-      NODE_ENV: production
+      NODE_ENV:                 production
+      JWT_ACCESS_SECRET:        ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET:       ${JWT_REFRESH_SECRET}
+      INVITE_HMAC_SECRET:       ${INVITE_HMAC_SECRET}
+      DEVICE_TOKEN_SECRET:      ${DEVICE_TOKEN_SECRET}
+      WG_KEY_ENCRYPTION_SECRET: ${WG_KEY_ENCRYPTION_SECRET}
+      RELAY_SESSION_KEY_SECRET: ${RELAY_SESSION_KEY_SECRET}
+      RELAY_AUTH_SECRET:        ${RELAY_AUTH_SECRET}
+      METRICS_BEARER_TOKEN:     ${METRICS_BEARER_TOKEN:-}
+      JWT_ACCESS_EXPIRES_IN:    ${JWT_ACCESS_EXPIRES_IN:-15m}
+      JWT_REFRESH_EXPIRES_IN:   ${JWT_REFRESH_EXPIRES_IN:-7d}
+      PORT:                     3000
+      REALTIME_PORT:            3001
+      RELAY_PORT:               3002
+      APP_URL:                  ${APP_URL:-http://localhost:3000}
+      RELAY_URL:                ${RELAY_URL:-ws://localhost:3002}
+      WG_SERVER_LISTEN_PORT:    ${WG_SERVER_LISTEN_PORT:-51820}
+      WG_BASE_SUBNET:           ${WG_BASE_SUBNET:-10.8.0.0/24}
+      WG_OUTBOUND_IFACE:        ${WG_OUTBOUND_IFACE:-eth0}
+      GATEWAY_HEARTBEAT_TIMEOUT_MS: ${GATEWAY_HEARTBEAT_TIMEOUT_MS:-30000}
+      GATEWAY_VERIFY_ATTEMPTS:  ${GATEWAY_VERIFY_ATTEMPTS:-3}
+      RATE_LIMIT_WINDOW_MS:     ${RATE_LIMIT_WINDOW_MS:-60000}
+      RATE_LIMIT_MAX:           ${RATE_LIMIT_MAX:-60}
     ports:
       - "3000:3000"
     depends_on:
@@ -85,61 +106,69 @@ services:
   realtime:
     <<: *app-image
     restart: unless-stopped
-    env_file: .env
     environment:
       <<: *app-env
-      NODE_ENV: production
+      NODE_ENV:              production
+      JWT_ACCESS_SECRET:     ${JWT_ACCESS_SECRET}
+      REALTIME_PORT:         3001
+      APP_URL:               ${APP_URL:-http://localhost:3000}
     command: ["node", "node_modules/tsx/dist/cli.mjs", "realtime/server.ts"]
     ports:
       - "3001:3001"
     depends_on:
-      redis:    { condition: service_healthy }
+      redis: { condition: service_healthy }
 
   # ── Relay / Networking Engine ────────────────────────────────────────────────
   relay:
     <<: *app-image
     restart: unless-stopped
-    env_file: .env
     environment:
       <<: *app-env
-      NODE_ENV: production
-      APP_URL:  http://app:3000
+      NODE_ENV:          production
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      RELAY_AUTH_SECRET: ${RELAY_AUTH_SECRET}
+      RELAY_PORT:        3002
+      APP_URL:           http://app:3000
+      GATEWAY_VERIFY_ATTEMPTS: ${GATEWAY_VERIFY_ATTEMPTS:-3}
     command: ["node", "node_modules/tsx/dist/cli.mjs", "relay/server.ts"]
     ports:
       - "3002:3002"
     depends_on:
-      app:      { condition: service_healthy }
-      redis:    { condition: service_healthy }
+      app:   { condition: service_healthy }
+      redis: { condition: service_healthy }
 
-  # ── Prometheus ───────────────────────────────────────────────────────────────
+  # ── Prometheus (config baked into custom image — no host mounts) ────────────
   prometheus:
-    image: prom/prometheus:v2.52.0
+    build:
+      context: docker/prometheus
+      dockerfile: Dockerfile
     restart: unless-stopped
     volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./monitoring/alerts.yml:/etc/prometheus/rules/alerts.yml:ro
       - prometheus_data:/prometheus
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
+      - --web.console.libraries=/usr/share/prometheus/console_libraries
+      - --web.console.templates=/usr/share/prometheus/consoles
     ports:
       - "9090:9090"
     depends_on:
       - app
 
-  # ── Grafana ───────────────────────────────────────────────────────────────────
+  # ── Grafana (provisioning baked into custom image — no host mounts) ─────────
   grafana:
-    image: grafana/grafana:10.4.2
+    build:
+      context: docker/grafana
+      dockerfile: Dockerfile
     restart: unless-stopped
     environment:
       GF_SECURITY_ADMIN_USER:     ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-changeme}
       GF_AUTH_ANONYMOUS_ENABLED:  "false"
     volumes:
-      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana_data:/var/lib/grafana
     ports:
-      - "3002:3000"
+      - "3003:3000"
     depends_on:
       - prometheus
 
